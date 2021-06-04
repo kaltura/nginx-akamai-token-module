@@ -32,6 +32,7 @@ typedef struct {
 	ngx_str_t key;
 	ngx_str_t iv;
 	ngx_http_complex_value_t *acl;
+	size_t acl_path_based;
 	ngx_secure_token_time_t end;
 } ngx_secure_token_iijpta_token_t;
 
@@ -71,6 +72,13 @@ static ngx_command_t ngx_http_secure_token_iijpta_cmds[] = {
 	offsetof(ngx_secure_token_iijpta_token_t, acl),
 	NULL },
 
+	{ ngx_string("acl_path_based"),
+	NGX_CONF_TAKE1,
+	ngx_conf_set_size_slot,
+	0,
+	offsetof(ngx_secure_token_iijpta_token_t, acl_path_based),
+	NULL },
+
 	{ ngx_string("end"),
 	NGX_CONF_TAKE1,
 	ngx_http_secure_token_conf_set_time_slot,
@@ -80,20 +88,54 @@ static ngx_command_t ngx_http_secure_token_iijpta_cmds[] = {
 };
 
 static ngx_int_t
-ngx_http_secure_token_get_acl_iijpta(ngx_http_request_t *r, ngx_http_complex_value_t *acl_conf, ngx_str_t* acl)
+ngx_http_secure_token_get_acl_iijpta(ngx_http_request_t *r, ngx_secure_token_iijpta_token_t *token, ngx_str_t *acl)
 {
+	ngx_http_secure_token_loc_conf_t *conf;
+	ngx_http_complex_value_t *acl_conf = token->acl;
+
+	conf = ngx_http_get_module_loc_conf(r, ngx_http_secure_token_filter_module);
+
 	// get the acl
-	if (acl_conf != NULL)
-	{
-		if (ngx_http_complex_value(r, acl_conf, acl) != NGX_OK)
-		{
-			return NGX_ERROR;
+	if (token->acl_path_based != NGX_CONF_UNSET_SIZE) {
+		if (token->acl_path_based == 0) {
+			ngx_str_set(acl, "/*");
+			return NGX_OK;
+		} else {
+			size_t cnt = 0;
+			size_t idx = r->uri.len - 1;
+			while (idx > 0)
+			{
+				if (r->uri.data[idx] == '/') {
+					cnt++;
+				}
+				if (cnt == token->acl_path_based) {
+					u_char *p;
+					size_t len = &r->uri.data[idx] - r->uri.data;
+					p = ngx_pnalloc(r->pool, len + sizeof("/*") - 1);
+					acl->data = p;
+					acl->len  = len + sizeof("/*") - 1;
+					p = ngx_copy(p, r->uri.data, len);
+					p = ngx_copy(p, "/*", sizeof("/*") - 1);
+					return NGX_OK;
+				}
+				idx--;
+			}
 		}
-	}
-	else
-	{
-		// the default is '/*'
 		ngx_str_set(acl, "/*");
+		return NGX_OK;
+	} else {
+		if (acl_conf != NULL)
+		{
+			if (ngx_http_complex_value(r, acl_conf, acl) != NGX_OK)
+			{
+				return NGX_ERROR;
+			}
+		}
+		else
+		{
+			// the default is '/*'
+			ngx_str_set(acl, "/*");
+		}
 	}
 
 	return NGX_OK;
@@ -122,7 +164,7 @@ ngx_secure_token_iijpta_get_var(
 
 	conf = ngx_http_get_module_loc_conf(r, ngx_http_secure_token_filter_module);
 
-	rc = ngx_http_secure_token_get_acl_iijpta(r, token->acl, &acl);
+	rc = ngx_http_secure_token_get_acl_iijpta(r, token, &acl);
 	if (rc != NGX_OK)
 	{
 		return rc;
@@ -131,7 +173,7 @@ ngx_secure_token_iijpta_get_var(
 	if (acl.len > PATH_LIMIT)
 	{
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-			"ngx_secure_token_iijpta_get_var: acl is too long for the iijpta token");
+			      "ngx_secure_token_iijpta_get_var: acl is too long for the iijpta token");
 		return NGX_ERROR;
 	}
 
@@ -152,14 +194,14 @@ ngx_secure_token_iijpta_get_var(
 	if (ctx == NULL)
 	{
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-			"ngx_secure_token_iijpta_get_var: EVP_CIPHER_CTX_new failed");
+			      "ngx_secure_token_iijpta_get_var: EVP_CIPHER_CTX_new failed");
 		return NGX_ERROR;
 	}
 
 	if (!EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, token->key.data, token->iv.data))
 	{
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-			"ngx_secure_token_iijpta_get_var: EVP_EncryptInit_ex failed");
+			      "ngx_secure_token_iijpta_get_var: EVP_EncryptInit_ex failed");
 		goto error;
 	}
 
@@ -175,7 +217,7 @@ ngx_secure_token_iijpta_get_var(
 	if (!EVP_EncryptUpdate(ctx, outp, &out_len, (void *)&hdr, sizeof(hdr)))
 	{
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-			"ngx_secure_token_iijpta_get_var: EVP_EncryptUpdate failed (1)");
+			      "ngx_secure_token_iijpta_get_var: EVP_EncryptUpdate failed (1)");
 		goto error;
 	}
 	outp += out_len;
@@ -183,7 +225,7 @@ ngx_secure_token_iijpta_get_var(
 	if (!EVP_EncryptUpdate(ctx, outp, &out_len, acl.data, acl.len))
 	{
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-			"ngx_secure_token_iijpta_get_var: EVP_EncryptUpdate failed (2)");
+			      "ngx_secure_token_iijpta_get_var: EVP_EncryptUpdate failed (2)");
 		goto error;
 	}
 	outp += out_len;
@@ -191,7 +233,7 @@ ngx_secure_token_iijpta_get_var(
 	if (!EVP_EncryptFinal_ex(ctx, outp, &out_len))
 	{
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-			"ngx_secure_token_iijpta_get_var: EVP_EncryptFinal_ex failed");
+			      "ngx_secure_token_iijpta_get_var: EVP_EncryptFinal_ex failed");
 		goto error;
 	}
 	outp += out_len;
@@ -249,6 +291,7 @@ ngx_secure_token_iijpta_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 	}
 
 	token->end.type = NGX_HTTP_SECURE_TOKEN_TIME_UNSET;
+	token->acl_path_based = NGX_CONF_UNSET_SIZE;
 
 	// parse the block
 	rv = ngx_http_secure_token_conf_block(
